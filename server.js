@@ -1,168 +1,93 @@
-const express = require("express");
-const cors = require("cors");
-const path = require("path");
-const fs = require("fs");
-const { MongoClient } = require("mongodb");
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-function loadConfig() {
-  const configPath = path.join(__dirname, "config.json");
-  if (!fs.existsSync(configPath)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(configPath, "utf8"));
-  } catch {
-    return {};
+const PORT = process.env.PORT || 5099;
+const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'ttoys.db');
+const CORS_ALLOWED = process.env.CORS_ALLOWED_ORIGINS || '*';
+
+// CORS
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!CORS_ALLOWED || CORS_ALLOWED === '*') return callback(null, true);
+    const allowed = CORS_ALLOWED.split(',').map(s => s.trim());
+    if (!origin) return callback(null, true);
+    if (allowed.indexOf(origin) !== -1) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET','POST','OPTIONS']
+};
+app.use(cors(corsOptions));
+
+// Ensure data dir exists
+const dataDir = path.dirname(DB_FILE);
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+// Initialize DB
+const db = new sqlite3.Database(DB_FILE, (err) => {
+  if (err) {
+    console.error('Failed to open DB', err);
+    process.exit(1);
   }
-}
+});
 
-const config = loadConfig();
-const corsAllowed = Array.isArray(config.corsAllowedOrigins)
-  ? config.corsAllowedOrigins
-  : String(process.env.CORS_ALLOWED_ORIGINS || "")
-      .split(",")
-      .map(value => value.trim())
-      .filter(Boolean);
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);`);
+  db.run(`CREATE TABLE IF NOT EXISTS app_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id TEXT,
+    page_name TEXT,
+    message TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );`);
+});
 
-if (corsAllowed.length === 0 || corsAllowed.includes("*")) {
-  app.use(cors());
-} else {
-  app.use(
-    cors({
-      origin: corsAllowed,
-      credentials: true
-    })
-  );
-}
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
+});
 
-const mongoConnectionString =
-  process.env.MONGO_CONNECTION_STRING ||
-  process.env.MONGO_URI ||
-  (config.mongo && config.mongo.connectionString) ||
-  "";
-const mongoDatabase =
-  process.env.MONGO_DATABASE ||
-  (config.mongo && config.mongo.database) ||
-  "ttoys";
+app.get('/api/info', (req, res) => {
+  res.json({ name: 'T-Toys Backend (Node)', env: process.env.NODE_ENV || 'development' });
+});
 
-let mongoClient;
-
-async function getMongoDatabase() {
-  if (!mongoConnectionString) return null;
-  if (!mongoClient) {
-    mongoClient = new MongoClient(mongoConnectionString);
-    await mongoClient.connect();
-  }
-  return mongoClient.db(mongoDatabase);
-}
-
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    time: new Date().toISOString()
+app.get(['/api/db/health','/api/mongo/health'], (req, res) => {
+  db.get('SELECT 1 as ok', [], (err, row) => {
+    if (err) return res.status(500).json({ status: 'error', error: err.message });
+    res.json({ status: 'ok', database: DB_FILE });
   });
 });
 
-app.get("/api/info", (req, res) => {
-  res.json({
-    name: "T-Toys API",
-    environment: process.env.NODE_ENV || "development"
+app.post('/app-logs/:appId/log-user-in-app/:pageName', (req, res) => {
+  const { appId, pageName } = req.params;
+  const message = req.body && req.body.message ? String(req.body.message) : null;
+  db.run('INSERT INTO app_logs (app_id, page_name, message) VALUES (?,?,?)', [appId, pageName, message], function(err){
+    if (err) return res.status(500).json({ status: 'error', error: err.message });
+    res.json({ status: 'ok', insertedId: this.lastID });
   });
 });
 
-app.post("/app-logs/:appId/log-user-in-app/:pageName", (req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.status(204).send();
-});
-
-app.get("/api/mongo/health", async (req, res) => {
-  if (!mongoConnectionString) {
-    res.status(503).json({
-      status: "error",
-      message: "Mongo is not configured."
-    });
-    return;
-  }
-
-  try {
-    const db = await getMongoDatabase();
-    if (!db) {
-      res.status(503).json({
-        status: "error",
-        message: "Mongo is not configured."
-      });
-      return;
-    }
-
-    await db.command({ ping: 1 });
-    res.json({
-      status: "ok",
-      database: db.databaseName
-    });
-  } catch (error) {
-    res.status(503).json({
-      status: "error",
-      message: error && error.message ? error.message : "Mongo health check failed."
-    });
-  }
-});
-
-const frontendPath = path.join(__dirname, "..", "frontend");
-const frontendIndex = path.join(frontendPath, "index.html");
-const devIndex = path.join(frontendPath, "dev", "index.html");
-const hasFrontend = fs.existsSync(frontendIndex);
-
-if (!hasFrontend) {
-  app.get("/", (req, res) => {
-    res.json({
-      name: "T-Toys API",
-      status: "ok"
-    });
-  });
-}
-
-if (hasFrontend) {
+// Serve frontend static files if available
+const frontendPath = path.resolve(__dirname, '..', 'frontend');
+if (fs.existsSync(frontendPath)) {
   app.use(express.static(frontendPath));
-  app.use("/frontend", express.static(frontendPath));
-
-  if (fs.existsSync(devIndex)) {
-    app.get("/dev", (req, res) => {
-      res.sendFile(devIndex);
-    });
-
-    app.get("/dev/*", (req, res) => {
-      res.sendFile(devIndex);
-    });
-  }
-
-  app.get("*", (req, res, next) => {
-    if (
-      req.path.startsWith("/api") ||
-      req.path.startsWith("/app-logs") ||
-      req.path.startsWith("/health")
-    ) {
-      next();
-      return;
-    }
-
-    if (path.extname(req.path)) {
-      next();
-      return;
-    }
-
-    res.sendFile(frontendIndex);
+  // SPA fallback
+  app.get('*', (req, res, next) => {
+    const file = path.join(frontendPath, 'index.html');
+    if (fs.existsSync(file)) return res.sendFile(file);
+    next();
   });
 }
 
-const port = Number(process.env.PORT || config.port || 5099);
-app.listen(port, () => {
-  console.log(`T-Toys API listening on port ${port}`);
+app.options('*', (req, res) => {
+  res.sendStatus(204);
 });
 
-process.on("SIGINT", async () => {
-  if (mongoClient) {
-    await mongoClient.close();
-  }
-  process.exit(0);
+app.listen(PORT, () => {
+  console.log(`T-Toys backend (node) listening on ${PORT}`);
 });
+

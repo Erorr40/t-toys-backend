@@ -1,8 +1,7 @@
 {
   "port": 5099,
   "corsAllowedOrigins": ["*"],
-  "mongo": {
-    "connectionString": "",
-    "database": "ttoys"
+  "db": {
+    "file": "data/ttoys.db"
   }
 }

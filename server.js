@@ -1,13 +1,67 @@
+// Suppress deprecation warnings for better compatibility
+process.env.NODE_NO_WARNINGS = '1';
+
+const { spawn } = require('child_process');
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
 
-const app = express();
-app.use(express.json());
+// Auto-check and install missing packages
+function ensureDependencies() {
+  const required = ['express', 'cors', 'sqlite3'];
+  const missing = [];
 
-const PORT = process.env.PORT || 5099;
+  for (const pkg of required) {
+    try {
+      require.resolve(pkg);
+    } catch (e) {
+      missing.push(pkg);
+    }
+  }
+
+  if (missing.length === 0) {
+    console.log('✅ All dependencies present');
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    console.log(`📦 Installing missing packages: ${missing.join(', ')}`);
+    
+    const npm = spawn('npm', ['install'], {
+      cwd: __dirname,
+      stdio: 'inherit',
+      shell: true,
+      detached: false
+    });
+
+    npm.on('close', (code) => {
+      if (code === 0) {
+        console.log('✅ Dependencies installed successfully');
+      } else {
+        console.warn('⚠️  npm install returned code', code, '(continuing anyway)');
+      }
+      resolve();
+    });
+
+    npm.on('error', (err) => {
+      console.warn('⚠️  Could not install packages:', err.message, '(continuing anyway)');
+      resolve();
+    });
+  });
+}
+
+// Start the app after ensuring dependencies
+ensureDependencies().then(() => {
+  startApp();
+});
+
+function startApp() {
+  const app = express();
+  app.use(express.json());
+
+const PORT = parseInt(process.env.PORT, 10) || 5099;
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'ttoys.db');
 const CORS_ALLOWED = process.env.CORS_ALLOWED_ORIGINS || '*';
 
@@ -31,8 +85,10 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 // Initialize DB
 const db = new sqlite3.Database(DB_FILE, (err) => {
   if (err) {
-    console.error('Failed to open DB', err);
+    console.error('❌ Failed to open DB:', err.message);
     process.exit(1);
+  } else {
+    console.log('✅ Database initialized:', DB_FILE);
   }
 });
 
@@ -87,7 +143,18 @@ app.options('*', (req, res) => {
   res.sendStatus(204);
 });
 
-app.listen(PORT, () => {
-  console.log(`T-Toys backend (node) listening on ${PORT}`);
+const server = app.listen(PORT, () => {
+  console.log(`🚀 T-Toys backend (node) listening on ${PORT}`);
 });
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('⏹️  Shutting down...');
+  if (db) db.close();
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+} // End of startApp function
 

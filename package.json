@@ -12,8 +12,13 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^4.21.0",
     "cors": "^2.8.5",
-    "sqlite3": "^5.1.6"
+    "sqlite3": "^5.1.7"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "start:no-warn": "node --no-deprecation server.js"
   }
 }
